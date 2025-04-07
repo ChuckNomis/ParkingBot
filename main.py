@@ -8,8 +8,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 app = FastAPI()
 
-# Mount the Telegram bot FastAPI app
-app.mount("/webhook", bot_app)
+app.include_router(bot_app)
 
 
 @app.on_event("startup")

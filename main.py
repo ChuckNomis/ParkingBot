@@ -1,14 +1,13 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from bot import bot_app, set_webhook
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 app = FastAPI()
 
-app.include_router(bot_app)
+app.mount("/webhook", bot_app)
 
 
 @app.on_event("startup")

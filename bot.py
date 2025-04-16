@@ -63,8 +63,9 @@ def get_main_menu():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
-
 # /start func
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["🅿️ Park", "🚶 Leave"],
@@ -77,7 +78,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         input_field_placeholder="Select an option ⬇️"
     )
     await update.message.reply_text("👋 Welcome! Choose an option below:", reply_markup=reply_markup)
-
 application.add_handler(CommandHandler("start", start))
 
 # /status func
@@ -100,12 +100,20 @@ application.add_handler(CommandHandler("status", status))
 application.add_handler(MessageHandler(
     filters.TEXT & filters.Regex("^📋 Status$"), status))
 
-
 # Phone share flow
 SHARE_PHONE = 2
 
 
 async def ask_for_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if phone already saved
+    user_id = update.effective_user.id
+    if user_id in USER_PHONES:
+        await update.message.reply_text(
+            "✅ Your phone number is already saved!",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
+
     keyboard = [[KeyboardButton("📱 Share my phone", request_contact=True)], [
         "❌ Cancel"]]
     reply_markup = ReplyKeyboardMarkup(
@@ -126,7 +134,6 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Phone sharing cancelled.", reply_markup=get_main_menu())
     return ConversationHandler.END
-
 application.add_handler(ConversationHandler(
     entry_points=[
         CommandHandler("sharephone", ask_for_phone),
@@ -147,9 +154,7 @@ application.add_handler(ConversationHandler(
     ]
 ))
 
-
 # /park flow
-
 PARKING_INPUT = 1  # State for parking input
 
 # Step 1: User taps 🅿️ Park
@@ -165,7 +170,6 @@ async def ask_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
     return PARKING_INPUT
-
 # Step 2: User provides slot number
 
 
@@ -183,30 +187,34 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Validate input
     if not text.isdigit():
-        await update.message.reply_text("❌ Please enter a valid number.")
+        keyboard = [["❌ Cancel"]]
+        reply_markup = ReplyKeyboardMarkup(
+            keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("❌ Please enter a valid number (1–31):", reply_markup=reply_markup)
         return PARKING_INPUT
 
     slot = int(text)
 
     # 1. Check range
     if slot not in PARKING_BLOCKS:
-        await update.message.reply_text("❌ Invalid slot. Choose a number between 1 and 31.")
+        keyboard = [["❌ Cancel"]]
+        reply_markup = ReplyKeyboardMarkup(
+            keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("❌ Invalid slot. Choose a number between 1 and 31:", reply_markup=reply_markup)
         return PARKING_INPUT
 
-    # 2. Check if user already parked
+    # 2. Already parked
     for s, info in PARKED_SLOTS.items():
         if info["user_id"] == user_id:
             await update.message.reply_text(f"❌ You are already parked in slot {s}. Please /leave first.", reply_markup=get_main_menu())
             return ConversationHandler.END
-    # 3. Check if taken
+
+    # 3. Slot taken
     if slot in PARKED_SLOTS:
         keyboard = [["❌ Cancel"]]
         reply_markup = ReplyKeyboardMarkup(
             keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(
-            "❌ That slot is already taken.\n\n🔁 Please enter another slot number (1–31):",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text("❌ That slot is already taken. Try another (1–31):", reply_markup=reply_markup)
         return PARKING_INPUT
 
     # 4. Save the slot
@@ -228,11 +236,14 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
                     chat_id=blocked_info["user_id"],
                     text=f"🚧 You're blocked by {name} in slot {slot}.\n📱 Phone: {phone}"
                 )
+                # Notify the parker about who they are blocking
+                blocked_name = blocked_info["name"]
+                blocked_phone = blocked_info.get("phone", "No phone shared")
+                await update.message.reply_text(f"⚠️ You are blocking {blocked_name} in slot {blocked_slot}.\n📱 Phone: {blocked_phone}")
             except Exception as e:
                 print(f"Could not notify {blocked_info['name']}: {e}")
 
     return ConversationHandler.END
-
 # Cancel handler
 
 
@@ -273,6 +284,13 @@ async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["user_id"] == user_id:
             del PARKED_SLOTS[slot]
             await update.message.reply_text(f"👋 {name}, you’ve left slot {slot}. It is now available.")
+            for blocled_slot in PARKING_BLOCKS.get(slot, []):
+                blocked_info = PARKED_SLOTS.get(blocled_slot)
+                if blocked_info:
+                    await context.bot.send_message(
+                        chat_id=blocked_info["user_id"],
+                        text=f"🚧 Slot {slot} is now available."
+                    )
             return
     await update.message.reply_text("❌ You’re not parked in any slot.")
 application.add_handler(MessageHandler(
@@ -280,7 +298,6 @@ application.add_handler(MessageHandler(
 application.add_handler(CommandHandler("leave", leave))
 
 
-# Webhook setup
 async def set_webhook():
     bot = Bot(token=TOKEN)
     await bot.set_webhook(url=WEBHOOK_URL)
@@ -291,6 +308,8 @@ router = APIRouter()
 @router.post(WEBHOOK_PATH)
 async def telegram_webhook(update: dict):
     update_obj = Update.de_json(update, bot=application.bot)
+
+    print("📩 Webhook triggered")
 
     # 🔧 THE FIX: Ensure app is initialized
     await application.initialize()

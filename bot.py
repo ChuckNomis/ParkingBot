@@ -1,5 +1,7 @@
 # bot.py
-import asyncio
+from pytz import timezone
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, ConversationHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -297,10 +299,36 @@ application.add_handler(MessageHandler(
     filters.TEXT & filters.Regex("^🚶 Leave$"), leave))
 application.add_handler(CommandHandler("leave", leave))
 
+# Fallback handler for unrecognized commands
+
+
+async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ I didn't understand that. Please choose an option from the menu.",
+        reply_markup=get_main_menu()
+    )
+
+application.add_handler(MessageHandler(
+    filters.TEXT & ~filters.COMMAND, fallback_handler))
+
+# Reset function
+
+
+def reset_parking():
+    PARKED_SLOTS.clear()
+
 
 async def set_webhook():
     bot = Bot(token=TOKEN)
     await bot.set_webhook(url=WEBHOOK_URL)
+    # Setup daily job
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(reset_parking, CronTrigger(
+        # Every day at 00:00
+        hour=0, minute=0, timezone=timezone("Asia/Jerusalem")))
+    scheduler.start()
+
+
 # FastAPI webhook route
 router = APIRouter()
 

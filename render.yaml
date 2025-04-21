@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: parking-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 7501857005:AAFBeuoOFra4thCH6k4Y3RloDwmrJr-IEfw
+      - key: WEBHOOK_URL
+        value: https://your-service-name.onrender.com/webhook

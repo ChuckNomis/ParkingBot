@@ -1,4 +1,5 @@
 # bot.py
+from datetime import datetime
 from pytz import timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -6,7 +7,7 @@ from fastapi import APIRouter
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, ConversationHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 
@@ -21,6 +22,7 @@ PARKING_YARDS = {
     "Hamasger50": {
         "slots": {},
         "blocks": {
+
             1: [],
             2: [1],
             3: [],
@@ -52,14 +54,16 @@ PARKING_YARDS = {
             29: [30],
             30: [],
             31: [],
+        },
+        "charging_slots": [4],
 
-        }
     },
     "BeitNip": {
         "slots": {},
         "blocks": {
             1: [], 2: [],
-        }
+        },
+        "charging_slots": [1, 2],
     }
 }
 USER_PHONES = {}
@@ -67,7 +71,10 @@ USER_YARD = {}  # key = user_id, value = yard name
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") + WEBHOOK_PATH
-application = Application.builder().token(TOKEN).build()
+application = Application.builder() \
+    .token(TOKEN) \
+    .post_init(lambda app: app.job_queue.set_application(app)) \
+    .build()
 
 
 def load_phones():
@@ -150,10 +157,13 @@ async def set_yard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Helper to enforce yard selection before using features
 
 
-def get_user_yard_or_ask(update: Update, user_id: int):
+async def ensure_yard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if user_id not in USER_YARD:
-        update.message.reply_text(
-            "🚧 Please select a yard first.", reply_markup=get_main_menu(user_id))
+        await update.message.reply_text(
+            "⚠️ Please choose a parking yard first.",
+            reply_markup=get_main_menu(user_id)
+        )
         return None
     return USER_YARD[user_id]
 
@@ -178,22 +188,42 @@ application.add_handler(ConversationHandler(
 # /status func
 
 
+...
+
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    yard_name = get_user_yard_or_ask(update, user_id)
+    yard_name = await ensure_yard(update, context)
     if yard_name is None:
         return
-
     yard = PARKING_YARDS[yard_name]
     taken = sorted(yard["slots"].keys())
     total_slots = sorted(yard["blocks"].keys())
     free = [slot for slot in total_slots if slot not in taken]
 
-    taken_list = ', '.join(str(s) for s in taken) or "None"
+    # Time now for calculating durations
+    now = datetime.now()
+    taken_lines = []
+    for slot in taken:
+        parked = yard["slots"][slot]
+        name = parked["name"]
+        parked_time = datetime.fromisoformat(parked["time"])
+        duration = now - parked_time
+        minutes = int(duration.total_seconds() // 60)
+        time_str = f"{minutes // 60}h {minutes % 60}m"
+
+        icon = "⚡ " if slot in yard.get("charging_slots", []) else ""
+        taken_lines.append(f"{icon}{slot} - {name} ({time_str})")
+
+    taken_text = '\n'.join(taken_lines) or "None"
     free_list = ', '.join(str(s) for s in free) or "None"
 
-    msg = f"📋 *{yard_name} Parking Status:*\n\n🟢 Available slots: {free_list}\n🔴 Taken slots: {taken_list}"
+    msg = f"📋 *{yard_name} Parking Status:*\n\n"
+    msg += f"🟢 Available slots: {free_list}\n\n"
+    msg += f"🔴 Taken slots:\n{taken_text}"
+
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+
 
 application.add_handler(CommandHandler("status", status))
 application.add_handler(MessageHandler(
@@ -270,10 +300,21 @@ application.add_handler(ConversationHandler(
 # park flow
 PARKING_INPUT = 1  # State for parking input
 
+
+async def send_charging_reminder(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    print("🔔 Reminder fired for:", data)  # ✅ Log
+    await context.bot.send_message(
+        chat_id=data["user_id"],
+        text=f"⚡ Reminder: You've been in charging slot {data['slot']} (Yard: {data['yard']}) for 1.5 hours. Please free it if you're done charging. 🔌"
+    )
+
+
 # Step 1: User taps 🅿️ Park
-
-
 async def ask_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    yard_name = await ensure_yard(update, context)
+    if yard_name is None:
+        return
     keyboard = [["❌ Cancel"]]
     reply_markup = ReplyKeyboardMarkup(
         keyboard, one_time_keyboard=True, resize_keyboard=True
@@ -291,8 +332,7 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = user.id
     name = user.full_name
     phone = USER_PHONES.get(user_id, "No phone number shared")
-
-    yard_name = get_user_yard_or_ask(update, user_id)
+    yard_name = await ensure_yard(update, context)
     if yard_name is None:
         return
 
@@ -328,8 +368,21 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
         "user_id": user_id,
         "name": name,
         "phone": phone,
-        "time": datetime.now()
+        "time": datetime.now().isoformat(),
     }
+    # ✅ Only schedule if it's a charging slot
+    if slot in yard.get("charging_slots", []):
+        reminder_time = datetime.now() + timedelta(hours=0, minutes=1)
+        context.job_queue.run_once(
+            send_charging_reminder,
+            when=reminder_time,
+            data={
+                "user_id": user_id,
+                "slot": slot,
+                "yard": yard_name
+            },
+            name=f"reminder_{user_id}_{yard_name}"
+        )
 
     await update.message.reply_text(f"✅ {name}, you parked in slot {slot} of {yard_name}.", reply_markup=get_main_menu(user_id))
 
@@ -354,7 +407,7 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = update.effective_user.full_name
-    yard_name = get_user_yard_or_ask(update, user_id)
+    yard_name = await ensure_yard(update, context)
     if yard_name is None:
         return
 
@@ -394,13 +447,18 @@ application.add_handler(ConversationHandler(
 
 async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id not in USER_YARD:
+        await update.message.reply_text(
+            "⚠️ Please choose a yard first:",
+            reply_markup=get_main_menu(user_id)
+        )
+        return
+
+    # If they have a yard, show normal fallback
     await update.message.reply_text(
         "❓ I didn't understand that. Please choose an option from the menu.",
         reply_markup=get_main_menu(user_id)
     )
-
-application.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND, fallback_handler))
 
 # Reset function
 
@@ -409,12 +467,14 @@ def reset_parking():
     for yard in PARKING_YARDS.values():
         yard["slots"].clear()
     USER_YARD.clear()
+    print("🧹 Parking slots and yards have been reset.")
 
 
 async def set_webhook():
     load_phones()
     bot = Bot(token=TOKEN)
     await bot.set_webhook(url=WEBHOOK_URL)
+    await application.job_queue.start()
     # Setup daily job
     scheduler = AsyncIOScheduler()
     scheduler.add_job(reset_parking, CronTrigger(

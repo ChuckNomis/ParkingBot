@@ -372,7 +372,7 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     # ✅ Only schedule if it's a charging slot
     if slot in yard.get("charging_slots", []):
-        reminder_time = datetime.now() + timedelta(hours=0, minutes=1)
+        reminder_time = datetime.now() + timedelta(hours=1, minutes=30)
         context.job_queue.run_once(
             send_charging_reminder,
             when=reminder_time,

@@ -55,7 +55,7 @@ PARKING_YARDS = {
             30: [],
             31: [],
         },
-        "charging_slots": [4],
+        "charging_slots": [],
 
     },
     "BeitNip": {

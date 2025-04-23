@@ -207,14 +207,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for slot in taken:
         parked = yard["slots"][slot]
         name = parked["name"]
-        parked_time = datetime.fromisoformat(parked["time"])
-        duration = now - parked_time
-        minutes = int(duration.total_seconds() // 60)
-        time_str = f"{minutes // 60}h {minutes % 60}m"
-
         icon = "⚡ " if slot in yard.get("charging_slots", []) else ""
-        taken_lines.append(f"{icon}{slot} - {name} ({time_str})")
-
+        if slot in yard.get("charging_slots", []):
+            parked_time = datetime.fromisoformat(parked["time"])
+            duration = now - parked_time
+            minutes = int(duration.total_seconds() // 60)
+            time_str = f" ({minutes // 60}h {minutes % 60}m)"
+        else:
+            time_str = ""
+        taken_lines.append(f"{icon}{slot} - {name}{time_str}")
     taken_text = '\n'.join(taken_lines) or "None"
     free_list = ', '.join(str(s) for s in free) or "None"
 

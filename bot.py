@@ -70,7 +70,7 @@ USER_PHONES = {}
 USER_YARD = {}  # key = user_id, value = yard name
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") + WEBHOOK_PATH
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 application = Application.builder() \
     .token(TOKEN) \
     .post_init(lambda app: app.job_queue.set_application(app)) \
@@ -473,8 +473,11 @@ def reset_parking():
 
 async def set_webhook():
     load_phones()
+
     bot = Bot(token=TOKEN)
+    await application.initialize()
     await bot.set_webhook(url=WEBHOOK_URL)
+    print(f"✅ Webhook set to: {WEBHOOK_URL}")
     await application.job_queue.start()
     # Setup daily job
     scheduler = AsyncIOScheduler()
@@ -501,3 +504,8 @@ async def telegram_webhook(update: dict):
     await application.process_update(update_obj)
 
 bot_app = router
+
+
+@router.get("/health")
+async def health():
+    return {"ok": True}

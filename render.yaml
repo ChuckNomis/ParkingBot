@@ -2,6 +2,7 @@ services:
   - type: web
     name: parking-bot
     runtime: python
+    healthCheckPath: /
     buildCommand: ""
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:

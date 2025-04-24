@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from bot import bot_app, set_webhook
+from bot import router, set_webhook
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
@@ -13,7 +13,7 @@ async def lifespan(app: FastAPI):
     # Optional: cleanup logic here
 
 app = FastAPI(lifespan=lifespan)
-app.mount("/webhook", bot_app)
+app.include_router(router)
 
 
 @app.get("/")

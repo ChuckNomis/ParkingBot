@@ -43,7 +43,7 @@ load_dotenv()                                          # read .env file
 
 TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_HOST: str = os.getenv("WEBHOOK_URL", "")  # without /webhook suffix
-WEBHOOK_PATH = ""
+WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 _JSON_LOCK = Lock()  # protect concurrent writes
 PHONES_FILE = "user_phones.json"   # persisted phone numbers
@@ -471,7 +471,7 @@ async def set_webhook():
 router = APIRouter()
 
 
-@router.post("/")
+@router.post(WEBHOOK_PATH)
 async def telegram_webhook(update: dict):
     await application.process_update(Update.de_json(update, bot=application.bot))
 

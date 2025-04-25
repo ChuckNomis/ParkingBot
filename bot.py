@@ -88,21 +88,33 @@ application = (
 # ── JSON helpers (atomic write) ─────────────────────────────────────────────
 
 
-def _read_json(path: Path, default):
+def _read_json(path: str | Path, default):
+    """
+    Read JSON from *path* (str or Path).
+    • Returns *default* on any FileNotFound / JSON error.
+    """
+    path = Path(path)                # <-- accept str transparently
     try:
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return default
 
 
-def _atomic_write(path: Path, data):
-    with _JSON_LOCK:
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent) as tmp:
-            json.dump(data, tmp)
-            temp_name = tmp.name
-        Path(temp_name).replace(path)
-
+def _atomic_write(path: str | Path, data):
+    """
+    Atomically write *data* as JSON to *path* (str or Path).
+    A temp-file in the same directory is moved into place so concurrent
+    readers never see a half-written file.
+    """
+    path = Path(path)                # <-- accept str transparently
+    with _JSON_LOCK:                 # protect concurrent writers
+        tmp_dir = path.parent
+        with tempfile.NamedTemporaryFile(
+            "w", delete=False, dir=tmp_dir, encoding="utf-8"
+        ) as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=2)
+        Path(tmp.name).replace(path)
 # ── Persistent load / save ─────────────────────────────────────────────────
 
 
@@ -111,7 +123,7 @@ def load_persistent():
     USER_PHONES = {int(k): v for k, v in _read_json(PHONES_FILE, {}).items()}
     ALLOWED_PHONES = set(_read_json(ALLOW_FILE, []))
     print("✅ phones", USER_PHONES)
-    print("✅ allow‑list", ALLOWED_PHONES)
+    print("✅ allow-list", ALLOWED_PHONES)
 
 
 def save_phones():

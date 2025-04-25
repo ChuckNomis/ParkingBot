@@ -1,523 +1,466 @@
-# bot.py
-from datetime import datetime
-from pytz import timezone
+# bot.py – Telegram Parking‑Yard Bot
+# -------------------------------------------------
+# A FastAPI + python‑telegram‑bot application that lets
+# users reserve parking slots in one of several yards, share
+# their phone number, and (optionally) get reminders when
+# charging‑only slots are occupied too long.
+# -------------------------------------------------
+
+
+# ── Standard Library ────────────────────────────────────────────────────────────
+import json
+import os
+import tempfile
+from contextlib import suppress
+from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Lock
+
+
+# ── 3rd‑party ──────────────────────────────────────────────────────────────────
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter
-from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, ConversationHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import os
-import json
+from fastapi import APIRouter
+from pytz import timezone
+from telegram import (
+    Bot,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
+# ── Environment / Globals ──────────────────────────────────────────────────────
+load_dotenv()                                          # read .env file
 
-load_dotenv()
+TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_HOST: str = os.getenv("WEBHOOK_URL", "")  # without /webhook suffix
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
+_JSON_LOCK = Lock()  # protect concurrent writes
+PHONES_FILE = "user_phones.json"   # persisted phone numbers
+ALLOW_FILE = "allowed_phones.json"
+# Telegram user‑IDs allowed to run /reset_all and /addphone <number>
+ADMIN_IDS = {1997945569}
 
-
-PHONES_FILE = "user_phones.json"
-SAVE_FILE = "parking_data.json"
-ADMIN_IDS = {1997945569}  # Replace with your Telegram user ID(s)
-PARKING_YARDS = {
+# ── Yard / slot configuration ──────────────────────────────────────────────────
+PARKING_YARDS: dict[str, dict] = {
     "Hamasger50": {
-        "slots": {},
-        "blocks": {
-
-            1: [],
-            2: [1],
-            3: [],
-            4: [3],
-            5: [],
-            6: [5],
-            7: [],
-            8: [7],
-            9: [],
-            10: [9],
-            11: [10, 9],
-            12: [],
-            13: [12],
-            14: [],
-            15: [],
-            16: [],
-            17: [],
-            18: [],
-            19: [],
-            20: [],
-            21: [],
-            22: [23, 24],
-            23: [24],
-            24: [],
-            25: [26],
-            26: [],
-            27: [28],
-            28: [],
-            29: [30],
-            30: [],
-            31: [],
+        "slots": {},                                 # runtime: {slot:int: info_dict}
+        "blocks": {                                 # which slots block which others
+            1: [], 2: [1], 3: [], 4: [3], 5: [], 6: [5], 7: [], 8: [7],
+            9: [], 10: [9], 11: [10, 9], 12: [], 13: [12], 14: [], 15: [],
+            16: [], 17: [], 18: [], 19: [], 20: [], 21: [], 22: [23, 24],
+            23: [24], 24: [], 25: [26], 26: [], 27: [28], 28: [], 29: [30],
+            30: [], 31: [],
         },
-        "charging_slots": [],
-
+        "charging_slots": [],                        # specify charging‑only slots
     },
     "BeitNip": {
         "slots": {},
-        "blocks": {
-            1: [], 2: [],
-        },
+        "blocks": {1: [], 2: []},
         "charging_slots": [1, 2],
-    }
+    },
 }
-USER_PHONES = {}
-USER_YARD = {}  # key = user_id, value = yard name
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-application = Application.builder() \
-    .token(TOKEN) \
-    .post_init(lambda app: app.job_queue.set_application(app)) \
+
+# These dicts are populated at runtime
+USER_PHONES: dict[int, str] = {}   # telegram_id -> phone
+USER_YARD: dict[int, str] = {}     # telegram_id -> chosen yard name
+ALLOWED_PHONES: set[str] = set()  # phone strings loaded from JSON
+
+# ── Telegram Application ───────────────────────────────────────────────────────
+application = (
+    Application.builder()
+    .token(TOKEN)
+    # make sure job_queue knows about the Application instance
+    .post_init(lambda app: app.job_queue.set_application(app))
     .build()
+)
+
+# ── JSON helpers (atomic write) ─────────────────────────────────────────────
 
 
-def load_phones():
-    global USER_PHONES
+def _read_json(path: Path, default):
     try:
-        with open(PHONES_FILE, "r") as f:
-            loaded = json.load(f)
-            # Convert keys back to int!
-            USER_PHONES = {int(k): v for k, v in loaded.items()}
-        print("✅ USER_PHONES loaded:", USER_PHONES)
+        with path.open() as f:
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        USER_PHONES = {}
-        print("⚠️ No phones loaded (file not found or bad format)")
+        return default
+
+
+def _atomic_write(path: Path, data):
+    with _JSON_LOCK:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent) as tmp:
+            json.dump(data, tmp)
+            temp_name = tmp.name
+        Path(temp_name).replace(path)
+
+# ── Persistent load / save ─────────────────────────────────────────────────
+
+
+def load_persistent():
+    global USER_PHONES, ALLOWED_PHONES
+    USER_PHONES = {int(k): v for k, v in _read_json(PHONES_FILE, {}).items()}
+    ALLOWED_PHONES = set(_read_json(ALLOW_FILE, []))
+    print("✅ phones", USER_PHONES)
+    print("✅ allow‑list", ALLOWED_PHONES)
 
 
 def save_phones():
-    with open(PHONES_FILE, "w") as f:
-        json.dump(USER_PHONES, f)
+    _atomic_write(PHONES_FILE, USER_PHONES)
 
 
-# Admin-only command to reset all yards
+def save_allow():
+    _atomic_write(ALLOW_FILE, list(ALLOWED_PHONES))
+
+# ── HELPERS : AUTHORISATION & MENUS ─────────────────────────────────────────
 
 
-async def admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ This command is restricted.")
+def main_menu(user_id: int | None = None) -> ReplyKeyboardMarkup:
+    if user_id not in USER_PHONES:                         # must share first
+        keyboard = [[KeyboardButton("📱 Share Phone", request_contact=True)]]
+    elif USER_PHONES[user_id] not in ALLOWED_PHONES:       # shared but not allowed
+        keyboard = [[]]   # empty keyboard
+    elif user_id is None or user_id not in USER_YARD:
+        keyboard = [["🏢 Choose Yard"]]
+    else:                                                  # fully authorised
+        keyboard = [["🅿️ Park", "🚶 Leave"], ["📋 Status"], ["🏢 Choose Yard"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+async def authorised(update: Update) -> bool:
+    u = update.effective_user
+    phone = USER_PHONES.get(u.id)
+    if u.id in ADMIN_IDS or (phone and phone in ALLOWED_PHONES):
+        return True
+    await update.message.reply_text("⛔ Private bot – ask admin for access.")
+    return False
+
+
+async def ensure_yard(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Ask user to pick a yard if they haven’t yet; return yard name or None."""
+    uid = update.effective_user.id
+    if uid not in USER_YARD:
+        await update.message.reply_text("⚠️ Please choose a yard first.", reply_markup=main_menu(uid))
+        return None
+    return USER_YARD[uid]
+
+# ─────────────────────────────── Handlers ─────────────────────────────────────
+
+
+# ADMIN COMMANDS
+async def _normalise(raw: str) -> str:
+    """Israel local digits→ +972… ; keep international numbers unchanged."""
+    return raw if raw.startswith("+") else f"+972{raw.lstrip('0')}"
+
+
+async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
         return
+    if not context.args:
+        await update.message.reply_text("Usage: /addphone <digits>")
+        return
+    phone = await _normalise(context.args[0])
+    if phone in ALLOWED_PHONES:
+        await update.message.reply_text("ℹ️ Already in allow‑list.")
+        return
+    ALLOWED_PHONES.add(phone)
+    save_allow()
+    await update.message.reply_text(f"✅ {phone} added.")
 
+
+async def del_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /delphone <digits>")
+        return
+    phone = await _normalise(context.args[0])
+    if phone not in ALLOWED_PHONES:
+        await update.message.reply_text("ℹ️ Not found in allow‑list.")
+        return
+    ALLOWED_PHONES.remove(phone)
+    save_allow()
+    await update.message.reply_text(f"🗑️ {phone} removed from allow‑list.")
+
+
+async def list_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if ALLOWED_PHONES:
+        text = "\n".join(sorted(ALLOWED_PHONES))
+    else:
+        text = "(empty)"
+    await update.message.reply_text(f"📄 Allowed phones:\n{text}")
+
+
+async def reset_all_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
     for yard in PARKING_YARDS.values():
         yard["slots"].clear()
-    await update.message.reply_text("✅ All parking yards have been reset.")
-    print("🧹 All parking yards have been reset.")
-application.add_handler(CommandHandler("reset_all", admin_reset))
-# Get manu func
+    await update.message.reply_text("🧹 All yards reset.")
+
+# register admin handlers
+action_admins = [
+    ("addphone", add_phone),
+    ("delphone", del_phone),
+    ("listphones", list_phones),
+    ("reset_all_slots", reset_all_slots),
+]
+for cmd, fn in action_admins:
+    application.add_handler(CommandHandler(cmd, fn))
 
 
-def get_main_menu(user_id=None):
-    if user_id is None or user_id not in USER_YARD:
-        keyboard = [["🏢 Choose Yard"]]
-    else:
-        keyboard = [
-            ["🅿️ Park", "🚶 Leave"],
-            ["📋 Status", "📱 Share Phone"],
-            ["🏢 Choose Yard"]
-        ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-# /start func
+# /start -------------------------------------------------------------------
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    reply_markup = get_main_menu(user_id)
-    await update.message.reply_text("👋 Welcome! Choose an option below:", reply_markup=reply_markup)
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Welcome! Choose an option below:", reply_markup=main_menu(update.effective_user.id))
+
 application.add_handler(CommandHandler("start", start))
 
-
+# Yard‑selection conversation -------------------------------------------------------------------
 SELECT_YARD = 3
 
-# Yard chooser flow
 
-
-async def choose_yard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[yard] for yard in PARKING_YARDS.keys()] + [["❌ Cancel"]]
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard, one_time_keyboard=True, resize_keyboard=True)
-    await update.message.reply_text("🏢 Choose a parking yard:", reply_markup=reply_markup)
+async def choose_yard(update: Update, _ctx):
+    yards = [[y] for y in PARKING_YARDS] + [["❌ Cancel"]]
+    await update.message.reply_text("🏢 Choose a parking yard:", reply_markup=ReplyKeyboardMarkup(yards, one_time_keyboard=True, resize_keyboard=True))
     return SELECT_YARD
 
 
-async def set_yard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    selected = update.message.text.strip()
-    user_id = update.effective_user.id
-    if selected in PARKING_YARDS:
-        USER_YARD[user_id] = selected
-        await update.message.reply_text(f"✅ You’re now using *{selected}*.", parse_mode="Markdown", reply_markup=get_main_menu(user_id))
+async def set_yard(update: Update, _ctx):
+    uid = update.effective_user.id
+    chosen = update.message.text.strip()
+    if chosen in PARKING_YARDS:
+        USER_YARD[uid] = chosen
+        await update.message.reply_text(f"✅ You’re now using *{chosen}*.", parse_mode="Markdown", reply_markup=main_menu(uid))
     else:
-        await update.message.reply_text("❌ Invalid yard selection.", reply_markup=get_main_menu(user_id))
+        await update.message.reply_text("❌ Invalid yard.", reply_markup=main_menu(uid))
     return ConversationHandler.END
-
-# Helper to enforce yard selection before using features
-
-
-async def ensure_yard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in USER_YARD:
-        await update.message.reply_text(
-            "⚠️ Please choose a parking yard first.",
-            reply_markup=get_main_menu(user_id)
-        )
-        return None
-    return USER_YARD[user_id]
-
-# Register yard chooser handler
-
-
-application.add_handler(ConversationHandler(
-    entry_points=[
-        MessageHandler(filters.TEXT & filters.Regex(
-            "^🏢 Choose Yard$"), choose_yard)
-    ],
-    states={
-        SELECT_YARD: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, set_yard)
-        ]
-    },
-    fallbacks=[
-        MessageHandler(filters.TEXT & filters.Regex("^❌ Cancel$"), set_yard)
-    ]
-))
-
-# /status func
-
-
-...
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    yard_name = await ensure_yard(update, context)
-    if yard_name is None:
-        return
-    yard = PARKING_YARDS[yard_name]
-    taken = sorted(yard["slots"].keys())
-    total_slots = sorted(yard["blocks"].keys())
-    free = [slot for slot in total_slots if slot not in taken]
-
-    # Time now for calculating durations
-    now = datetime.now()
-    taken_lines = []
-    for slot in taken:
-        parked = yard["slots"][slot]
-        name = parked["name"]
-        icon = "⚡ " if slot in yard.get("charging_slots", []) else ""
-        if slot in yard.get("charging_slots", []):
-            parked_time = datetime.fromisoformat(parked["time"])
-            duration = now - parked_time
-            minutes = int(duration.total_seconds() // 60)
-            time_str = f" ({minutes // 60}h {minutes % 60}m)"
-        else:
-            time_str = ""
-        taken_lines.append(f"{icon}{slot} - {name}{time_str}")
-    taken_text = '\n'.join(taken_lines) or "None"
-    free_list = ', '.join(str(s) for s in free) or "None"
-
-    msg = f"📋 *{yard_name} Parking Status:*\n\n"
-    msg += f"🟢 Available slots: {free_list}\n\n"
-    msg += f"🔴 Taken slots:\n{taken_text}"
-
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_menu(user_id))
-
-
-application.add_handler(CommandHandler("status", status))
-application.add_handler(MessageHandler(
-    filters.TEXT & filters.Regex("^📋 Status$"), status))
-
-
-# Phone share flow
-SHARE_PHONE = 2
-
-
-async def ask_for_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if phone already saved
-    user_id = update.effective_user.id
-    if user_id in USER_PHONES:
-        await update.message.reply_text(
-            "✅ Your phone number is already saved!",
-            reply_markup=get_main_menu(user_id)
-        )
-        return ConversationHandler.END
-
-    keyboard = [[KeyboardButton("📱 Share my phone", request_contact=True)], [
-        "❌ Cancel"]]
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard, resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text("📱 Tap the button to share your phone number:", reply_markup=reply_markup)
-    return SHARE_PHONE
-
-
-async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    if contact:
-        user_id = contact.user_id
-        phone = contact.phone_number
-
-        # ✅ Don't save duplicate
-        if USER_PHONES.get(user_id) == phone:
-            await update.message.reply_text(
-                "📱 Your phone number is already saved!",
-                reply_markup=get_main_menu(user_id)
-            )
-            return ConversationHandler.END
-
-        # Save if new or changed
-        USER_PHONES[user_id] = phone
-        save_phones()
-        await update.message.reply_text("✅ Phone number saved!", reply_markup=get_main_menu(user_id))
-        print(f"📱 Phone number saved for user {user_id}: {phone}")
-        return ConversationHandler.END
-
-
-async def cancel_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text("❌ Phone sharing cancelled.", reply_markup=get_main_menu(user_id))
-    return ConversationHandler.END
-application.add_handler(ConversationHandler(
-    entry_points=[
-        CommandHandler("sharephone", ask_for_phone),
-        MessageHandler(filters.TEXT & filters.Regex(
-            "^📱 Share Phone$"), ask_for_phone)
-    ],
-    states={
-        SHARE_PHONE: [
-            MessageHandler(filters.CONTACT, receive_phone),
-            # Catch any non-contact reply
-            MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_phone)
-        ]
-    },
-    fallbacks=[
-        CommandHandler("cancel", cancel_phone),
-        MessageHandler(filters.TEXT & filters.Regex(
-            "^❌ Cancel$"), cancel_phone)
-    ]
-))
-
-# park flow
-PARKING_INPUT = 1  # State for parking input
-
-
-async def send_charging_reminder(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    user_id = data["user_id"]
-    slot = data["slot"]
-    yard_name = data["yard"]
-    yard = PARKING_YARDS[yard_name]
-    if yard is None:
-        return
-    current = yard["slots"].get(slot)
-    if current is None or current["user_id"] != user_id:
-        return  # Slot is free or not owned by user
-    print("🔔 Reminder fired for:", data)  # ✅ Log
-    await context.bot.send_message(
-        chat_id=data["user_id"],
-        text=f"⚡ Reminder: You've been in charging slot {data['slot']} (Yard: {data['yard']}) for 1.5 hours. Please free it if you're done charging. 🔌"
-    )
-
-
-# Step 1: User taps 🅿️ Park
-async def ask_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    yard_name = await ensure_yard(update, context)
-    if yard_name is None:
-        return
-    keyboard = [["❌ Cancel"]]
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard, one_time_keyboard=True, resize_keyboard=True
-    )
-    await update.message.reply_text(
-        "📝 Please enter your parking slot number:",
-        reply_markup=reply_markup
-    )
-    return PARKING_INPUT
-# Step 2: User provides slot number
-
-
-async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    name = user.full_name
-    phone = USER_PHONES.get(user_id, "No phone number shared")
-    yard_name = await ensure_yard(update, context)
-    if yard_name is None:
-        return
-
-    yard = PARKING_YARDS[yard_name]
-    slots = yard["slots"]
-    blocks = yard["blocks"]
-
-    text = update.message.text.strip()
-    if text == "❌ Cancel":
-        await update.message.reply_text("❌ Parking cancelled.", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    if not text.isdigit():
-        await update.message.reply_text("❌ Please enter a valid number.", reply_markup=ReplyKeyboardMarkup([["❌ Cancel"]], one_time_keyboard=True, resize_keyboard=True))
-        return 1
-
-    slot = int(text)
-
-    if slot not in blocks:
-        await update.message.reply_text("❌ Invalid slot number for this yard.", reply_markup=ReplyKeyboardMarkup([["❌ Cancel"]], one_time_keyboard=True, resize_keyboard=True))
-        return 1
-
-    for s, info in slots.items():
-        if info["user_id"] == user_id:
-            await update.message.reply_text(f"❌ You are already parked in slot {s}. Please /leave first.", reply_markup=get_main_menu(user_id))
-            return ConversationHandler.END
-
-    if slot in slots:
-        await update.message.reply_text("❌ That slot is already taken. Try another.", reply_markup=ReplyKeyboardMarkup([["❌ Cancel"]], one_time_keyboard=True, resize_keyboard=True))
-        return 1
-
-    slots[slot] = {
-        "user_id": user_id,
-        "name": name,
-        "phone": phone,
-        "time": datetime.now().isoformat(),
-    }
-    # ✅ Only schedule if it's a charging slot
-    if slot in yard.get("charging_slots", []):
-        reminder_time = datetime.now() + timedelta(hours=1, minutes=30)
-        context.job_queue.run_once(
-            send_charging_reminder,
-            when=reminder_time,
-            data={
-                "user_id": user_id,
-                "slot": slot,
-                "yard": yard_name
-            },
-            name=f"reminder_{user_id}_{yard_name}"
-        )
-
-    await update.message.reply_text(f"✅ {name}, you parked in slot {slot} of {yard_name}.", reply_markup=get_main_menu(user_id))
-    print(f"🚗 {name} parked in slot {slot} of {yard_name}.")
-    for blocked_slot in blocks.get(slot, []):
-        blocked_info = slots.get(blocked_slot)
-        if blocked_info:
-            try:
-                await context.bot.send_message(
-                    chat_id=blocked_info["user_id"],
-                    text=f"🚧 You're blocked by {name} in slot {slot}.\n📱 Phone: {phone}"
-                )
-                await update.message.reply_text(f"⚠️ You are blocking {blocked_info['name']} in slot {blocked_slot}.\n📱 Phone: {blocked_info.get('phone', 'No phone shared')}")
-            except Exception as e:
-                print(f"Could not notify {blocked_info['name']}: {e}")
-
-    return ConversationHandler.END
-
-
-# /leave func
-
-
-async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    name = update.effective_user.full_name
-    yard_name = await ensure_yard(update, context)
-    if yard_name is None:
-        return
-
-    yard = PARKING_YARDS[yard_name]
-    slots = yard["slots"]
-    blocks = yard["blocks"]
-
-    for slot, info in list(slots.items()):
-        if info["user_id"] == user_id:
-            del slots[slot]
-            await update.message.reply_text(f"👋 {name}, you’ve left slot {slot} in {yard_name}. It is now available.")
-            print(f"🚗 {name} left slot {slot} in {yard_name}.")
-            for blocked_slot in blocks.get(slot, []):
-                blocked_info = slots.get(blocked_slot)
-                if blocked_info:
-                    await context.bot.send_message(
-                        chat_id=blocked_info["user_id"],
-                        text=f"🚧 Slot {slot} is now available."
-                    )
-            return
-
-    await update.message.reply_text("❌ You’re not parked in any slot.")
-
-application.add_handler(MessageHandler(
-    filters.TEXT & filters.Regex("^🚶 Leave$"), leave))
-application.add_handler(CommandHandler("leave", leave))
 
 application.add_handler(ConversationHandler(
     entry_points=[MessageHandler(
-        filters.TEXT & filters.Regex("^🅿️ Park$"), ask_parking_slot)],
-    states={
-        1: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_parking_slot)]},
-    fallbacks=[MessageHandler(
-        filters.TEXT & filters.Regex("^❌ Cancel$"), leave)]
+        filters.Regex("^🏢 Choose Yard$"), choose_yard)],
+    states={SELECT_YARD: [MessageHandler(~filters.COMMAND, set_yard)]},
+    fallbacks=[MessageHandler(filters.Regex("^❌ Cancel$"), set_yard)],
 ))
-# Fallback handler for unrecognized commands
+
+# /Status command -------------------------------------------------------------------
 
 
-async def fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in USER_YARD:
-        await update.message.reply_text(
-            "⚠️ Please choose a yard first:",
-            reply_markup=get_main_menu(user_id)
-        )
+async def status(update: Update, ctx):
+    uid = update.effective_user.id
+    yard_name = await ensure_yard(update, ctx)
+    if yard_name is None:
         return
 
-    # If they have a yard, show normal fallback
-    await update.message.reply_text(
-        "❓ I didn't understand that. Please choose an option from the menu.",
-        reply_markup=get_main_menu(user_id)
-    )
+    yard = PARKING_YARDS[yard_name]
+    total_slots = sorted(yard["blocks"])
+    taken_slots = sorted(yard["slots"])
+    free_slots = [s for s in total_slots if s not in taken_slots]
 
-# Reset function
+    now = datetime.now()
+    lines: list[str] = []
+    for s in taken_slots:
+        info = yard["slots"][s]
+        prefix = "⚡ " if s in yard["charging_slots"] else ""
+        t_str = ""
+        if s in yard["charging_slots"]:
+            minutes = int(
+                (now - datetime.fromisoformat(info["time"])).total_seconds() // 60)
+            t_str = f" ({minutes//60}h {minutes % 60}m)"
+        lines.append(f"{prefix}{s} - {info['name']}{t_str}")
+
+    taken_txt = "\n".join(lines) or "None"
+    free_txt = ", ".join(map(str, free_slots)) or "None"
+
+    msg = (f"📋 *{yard_name} Parking Status:*\n\n"
+           f"🟢 Available slots: {free_txt}\n\n"
+           f"🔴 Taken slots:\n{taken_txt}")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_menu(uid))
+
+application.add_handler(CommandHandler("status", status))
+application.add_handler(MessageHandler(filters.Regex("^📋 Status$"), status))
+
+# Phone‑sharing conversation -------------------------------------------------------------------
+SHARE_PHONE = 2
+
+
+async def ask_for_phone(update: Update, _ctx):
+    uid = update.effective_user.id
+    if uid in USER_PHONES:
+        await update.message.reply_text("✅ Your phone number is already saved!", reply_markup=main_menu(uid))
+        return ConversationHandler.END
+    kb = [[KeyboardButton("📱 Share my phone", request_contact=True)], [
+        "❌ Cancel"]]
+    await update.message.reply_text("📱 Tap the button to share your phone:", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True))
+    return SHARE_PHONE
+
+
+async def receive_phone(update: Update, _ctx):
+    if not update.message.contact:
+        return ConversationHandler.END
+    uid = update.message.contact.user_id
+    USER_PHONES[uid] = update.message.contact.phone_number
+    save_phones()
+    await update.message.reply_text("✅ Phone saved!", reply_markup=main_menu(uid))
+    return ConversationHandler.END
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler("sharephone", ask_for_phone), MessageHandler(
+        filters.Regex("^📱 Share Phone$"), ask_for_phone)],
+    states={SHARE_PHONE: [MessageHandler(filters.CONTACT, receive_phone)]},
+    fallbacks=[MessageHandler(filters.Regex("^❌ Cancel$"), receive_phone)],
+))
+
+# Parking workflow ----------------------------------------------------------------
+PARKING_INPUT = 1
+
+
+async def ask_parking_slot(update: Update, ctx):
+    if await ensure_yard(update, ctx) is None:
+        return
+    await update.message.reply_text("📝 Enter parking slot #:", reply_markup=ReplyKeyboardMarkup([["❌ Cancel"]], one_time_keyboard=True))
+    return PARKING_INPUT
+
+
+async def send_charging_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    """Job‑queue callback: remind user only if still occupying the slot."""
+    data = ctx.job.data  # {'user_id', 'slot', 'yard'}
+    yard = PARKING_YARDS.get(data["yard"])
+    current = yard and yard["slots"].get(data["slot"])
+    if not current or current["user_id"] != data["user_id"]:
+        return  # user moved / slot is free – do nothing
+    await ctx.bot.send_message(data["user_id"],
+                               f"⚡ Reminder: You've been in charging slot {data['slot']} ({data['yard']}) for 1.5 h. Please free it if you're done.")
+
+
+async def handle_parking_slot(update: Update, ctx):
+    uid = update.effective_user.id
+    yard_name = await ensure_yard(update, ctx)
+    if yard_name is None:
+        return
+
+    txt = update.message.text.strip()
+    if txt == "❌ Cancel":
+        await update.message.reply_text("❌ Cancelled.", reply_markup=main_menu(uid))
+        return ConversationHandler.END
+    if not txt.isdigit():
+        await update.message.reply_text("❌ Please enter a number.")
+        return PARKING_INPUT
+
+    slot = int(txt)
+    yard = PARKING_YARDS[yard_name]
+    if slot not in yard["blocks"]:
+        await update.message.reply_text("❌ Invalid slot for this yard.")
+        return PARKING_INPUT
+    if slot in yard["slots"]:
+        await update.message.reply_text("❌ Slot taken, choose another.")
+        return PARKING_INPUT
+
+    # park user
+    yard["slots"][slot] = {
+        "user_id": uid,
+        "name": update.effective_user.full_name,
+        "phone": USER_PHONES.get(uid, "unknown"),
+        "time": datetime.now().isoformat(),
+    }
+    await update.message.reply_text(f"✅ Parked in slot {slot}.", reply_markup=main_menu(uid))
+
+    # charging reminder
+    if slot in yard["charging_slots"]:
+        ctx.job_queue.run_once(send_charging_reminder, when=datetime.now(
+        ) + timedelta(hours=1, minutes=30), data={"user_id": uid, "slot": slot, "yard": yard_name})
+
+    # notify blocked slots
+    for blocked in yard["blocks"].get(slot, []):
+        info = yard["slots"].get(blocked)
+        if info:
+            with suppress(Exception):
+                await ctx.bot.send_message(info["user_id"], f"🚧 You're blocked by {update.effective_user.full_name} (slot {slot}).")
+
+    return ConversationHandler.END
+
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(
+        filters.Regex("^🅿️ Park$"), ask_parking_slot)],
+    states={PARKING_INPUT: [MessageHandler(
+        ~filters.COMMAND, handle_parking_slot)]},
+    fallbacks=[MessageHandler(filters.Regex(
+        "^❌ Cancel$"), handle_parking_slot)],
+))
+
+# 6. /Leave -------------------------------------------------------------------
+
+
+async def leave(update: Update, ctx):
+    uid = update.effective_user.id
+    yard_name = await ensure_yard(update, ctx)
+    if yard_name is None:
+        return
+    yard = PARKING_YARDS[yard_name]
+    for slot, info in list(yard["slots"].items()):
+        if info["user_id"] == uid:
+            del yard["slots"][slot]
+            await update.message.reply_text(f"👋 You left slot {slot}.", reply_markup=main_menu(uid))
+            # inform people who were blocked by that slot
+            for b in yard["blocks"].get(slot, []):
+                blk_info = yard["slots"].get(b)
+                if blk_info:
+                    with suppress(Exception):
+                        await ctx.bot.send_message(blk_info["user_id"], f"🚧 Slot {slot} is now free.")
+            return
+    await update.message.reply_text("❌ You are not parked.")
+
+application.add_handler(CommandHandler("leave", leave))
+application.add_handler(MessageHandler(filters.Regex("^🚶 Leave$"), leave))
+
+# Fallback -------------------------------------------------------------------
+
+
+async def fallback(update: Update, _):
+    await update.message.reply_text("❓ I didn't understand. Use the menu.", reply_markup=main_menu(update.effective_user.id))
+
+application.add_handler(MessageHandler(~filters.COMMAND, fallback))
+
+# ── Scheduled reset at midnight ───────────────────────────────────────────────
 
 
 def reset_parking():
     for yard in PARKING_YARDS.values():
         yard["slots"].clear()
     USER_YARD.clear()
-    print("🧹 Parking slots and yards have been reset.")
+    print("🧹 Daily reset complete")
+
+# ── Webhook setup & FastAPI bridge ────────────────────────────────────────────
 
 
 async def set_webhook():
-    load_phones()
-
+    load_persistent()
     bot = Bot(token=TOKEN)
     await application.initialize()
     await bot.set_webhook(url=WEBHOOK_URL)
-    print(f"✅ Webhook set to: {WEBHOOK_URL}")
     await application.job_queue.start()
-    # Setup daily job
+    # Daily reset 00:00
     scheduler = AsyncIOScheduler()
     scheduler.add_job(reset_parking, CronTrigger(
-        # Every day at 00:00
         hour=0, minute=0, timezone=timezone("Asia/Jerusalem")))
     scheduler.start()
-
-
-# FastAPI webhook route
 router = APIRouter()
 
 
-@router.post("/webhook")
+@router.post(WEBHOOK_PATH)
 async def telegram_webhook(update: dict):
-    update_obj = Update.de_json(update, bot=application.bot)
-
-    print("📩 Webhook triggered")
-
-    # 🔧 THE FIX: Ensure app is initialized
-    await application.initialize()
-
-    # Process the update
-    await application.process_update(update_obj)
+    await application.process_update(Update.de_json(update, bot=application.bot))
 
 bot_app = router
-
-
-@router.get("/health")
-async def health():
-    return {"ok": True}

@@ -107,6 +107,7 @@ async def admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for yard in PARKING_YARDS.values():
         yard["slots"].clear()
     await update.message.reply_text("✅ All parking yards have been reset.")
+    print("🧹 All parking yards have been reset.")
 application.add_handler(CommandHandler("reset_all", admin_reset))
 # Get manu func
 
@@ -271,6 +272,7 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_PHONES[user_id] = phone
         save_phones()
         await update.message.reply_text("✅ Phone number saved!", reply_markup=get_main_menu(user_id))
+        print(f"📱 Phone number saved for user {user_id}: {phone}")
         return ConversationHandler.END
 
 
@@ -304,6 +306,15 @@ PARKING_INPUT = 1  # State for parking input
 
 async def send_charging_reminder(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
+    user_id = data["user_id"]
+    slot = data["slot"]
+    yard_name = data["yard"]
+    yard = PARKING_YARDS[yard_name]
+    if yard is None:
+        return
+    current = yard["slots"].get(slot)
+    if current is None or current["user_id"] != user_id:
+        return  # Slot is free or not owned by user
     print("🔔 Reminder fired for:", data)  # ✅ Log
     await context.bot.send_message(
         chat_id=data["user_id"],
@@ -386,7 +397,7 @@ async def handle_parking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     await update.message.reply_text(f"✅ {name}, you parked in slot {slot} of {yard_name}.", reply_markup=get_main_menu(user_id))
-
+    print(f"🚗 {name} parked in slot {slot} of {yard_name}.")
     for blocked_slot in blocks.get(slot, []):
         blocked_info = slots.get(blocked_slot)
         if blocked_info:
@@ -420,6 +431,7 @@ async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if info["user_id"] == user_id:
             del slots[slot]
             await update.message.reply_text(f"👋 {name}, you’ve left slot {slot} in {yard_name}. It is now available.")
+            print(f"🚗 {name} left slot {slot} in {yard_name}.")
             for blocked_slot in blocks.get(slot, []):
                 blocked_info = slots.get(blocked_slot)
                 if blocked_info:

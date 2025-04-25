@@ -471,7 +471,7 @@ async def set_webhook():
 router = APIRouter()
 
 
-@router.post(WEBHOOK_PATH)
+@router.post("/")
 async def telegram_webhook(update: dict):
     await application.process_update(Update.de_json(update, bot=application.bot))
 

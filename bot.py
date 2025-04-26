@@ -241,15 +241,16 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 application.add_handler(CommandHandler("start", start))
 
 # Yard‑selection conversation -------------------------------------------------------------------
-SELECT_YARD = 3
+SELECT_YARD = 3     # conversation state id
 
 
 async def choose_yard(update: Update, _ctx):
-    yards = [[y] for y in PARKING_YARDS] + [["❌ Cancel"]]
+    """Ask the user to pick a yard."""
+    keyboard = [[name] for name in PARKING_YARDS] + [["❌ Cancel"]]
     await update.message.reply_text(
-        "🏢 Choose a parking yard:",
+        "🏢 Choose a parking yard:",                     # <-- text is mandatory
         reply_markup=ReplyKeyboardMarkup(
-            yards,
+            keyboard,
             one_time_keyboard=True,
             resize_keyboard=True,
         ),
@@ -258,21 +259,26 @@ async def choose_yard(update: Update, _ctx):
 
 
 async def set_yard(update: Update, _ctx):
+    """Store the yard the user tapped on."""
     uid = update.effective_user.id
     chosen = update.message.text.strip()
     if chosen in PARKING_YARDS:
         USER_YARD[uid] = chosen
-        await update.message.reply_text(f"✅ You’re now using *{chosen}*.", parse_mode="Markdown", reply_markup=main_menu(uid))
+        await update.message.reply_text(
+            f"✅ You’re now using *{chosen}*.",
+            parse_mode="Markdown",
+            reply_markup=main_menu(uid),
+        )
     else:
         await update.message.reply_text("❌ Invalid yard.", reply_markup=main_menu(uid))
     return ConversationHandler.END
 
+
 application.add_handler(
     ConversationHandler(
         entry_points=[
-            MessageHandler(         # user taps the button
-                choose_yard,
-            )
+            # ✔ filter + callback – no crash
+            MessageHandler(filters.Regex(r"^🏢 Choose Yard$"), choose_yard)
         ],
         states={
             SELECT_YARD: [

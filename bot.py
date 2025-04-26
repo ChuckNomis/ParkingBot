@@ -246,7 +246,7 @@ SELECT_YARD = 3
 
 async def choose_yard(update: Update, _ctx):
     yards = [[y] for y in PARKING_YARDS] + [["❌ Cancel"]]
-    await update.message.reply_text("🏢 Choose a parking yard:", reply_markup=ReplyKeyboardMarkup(yards, one_time_keyboard=True, resize_keyboard=True))
+    await update.message.reply_text(reply_markup=ReplyKeyboardMarkup(yards, one_time_keyboard=True, resize_keyboard=True))
     return SELECT_YARD
 
 
@@ -260,12 +260,25 @@ async def set_yard(update: Update, _ctx):
         await update.message.reply_text("❌ Invalid yard.", reply_markup=main_menu(uid))
     return ConversationHandler.END
 
-application.add_handler(ConversationHandler(
-    entry_points=[MessageHandler(
-        filters.Regex("^🏢 Choose Yard$"), choose_yard)],
-    states={SELECT_YARD: [MessageHandler(~filters.COMMAND, set_yard)]},
-    fallbacks=[MessageHandler(filters.Regex("^❌ Cancel$"), set_yard)],
-))
+application.add_handler(
+    ConversationHandler(
+        entry_points=[
+            MessageHandler(         # user taps the button
+                filters.Regex(r"^🏢 Choose Yard$"),
+                choose_yard,
+            )
+        ],
+        states={
+            SELECT_YARD: [
+                MessageHandler(~filters.COMMAND, set_yard)
+            ]
+        },
+        fallbacks=[
+            MessageHandler(filters.Regex(r"^❌ Cancel$"), set_yard)
+        ],
+    )
+)
+
 
 # /Status command -------------------------------------------------------------------
 
@@ -436,7 +449,9 @@ async def leave(update: Update, ctx):
 
 application.add_handler(CommandHandler("leave", leave))
 application.add_handler(MessageHandler(filters.Regex("^🚶 Leave$"), leave))
-
+application.add_handler(
+    MessageHandler(filters.CONTACT, receive_phone)
+)
 # Fallback -------------------------------------------------------------------
 
 

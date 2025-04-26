@@ -246,7 +246,14 @@ SELECT_YARD = 3
 
 async def choose_yard(update: Update, _ctx):
     yards = [[y] for y in PARKING_YARDS] + [["❌ Cancel"]]
-    await update.message.reply_text(reply_markup=ReplyKeyboardMarkup(yards, one_time_keyboard=True, resize_keyboard=True))
+    await update.message.reply_text(
+        "🏢 Choose a parking yard:",
+        reply_markup=ReplyKeyboardMarkup(
+            yards,
+            one_time_keyboard=True,
+            resize_keyboard=True,
+        ),
+    )
     return SELECT_YARD
 
 
@@ -264,7 +271,6 @@ application.add_handler(
     ConversationHandler(
         entry_points=[
             MessageHandler(         # user taps the button
-                filters.Regex(r"^🏢 Choose Yard$"),
                 choose_yard,
             )
         ],

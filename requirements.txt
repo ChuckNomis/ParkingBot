@@ -4,7 +4,7 @@
 
 fastapi>=0.110,<0.111              # Web framework (FastAPI 0.110.x)
 uvicorn[standard]>=0.27,<0.28      # ASGI server used by FastAPI / Render
-python-telegram-bot[asyncio]>=20.7,<21   # Telegram bot library (async API, v20)
+python-telegram-bot>=20.7,<21   # Telegram bot library (async API, v20)
 python-dotenv>=1.0,<2              # Load secrets from .env
 apscheduler>=3.10,<3.11            # In-process scheduler (daily reset, reminders)
 pytz>=2024.1,<2025.0               # Time-zone helpers for APScheduler

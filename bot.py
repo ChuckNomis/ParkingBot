@@ -46,8 +46,9 @@ WEBHOOK_HOST: str = os.getenv("WEBHOOK_URL", "")  # without /webhook suffix
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 _JSON_LOCK = Lock()  # protect concurrent writes
-PHONES_FILE = "user_phones.json"   # persisted phone numbers
-ALLOW_FILE = "allowed_phones.json"
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+PHONES_FILE = DATA_DIR / "user_phones.json"   # persisted phone numbers
+ALLOW_FILE = DATA_DIR / "allowed_phones.json"
 # Telegram user‑IDs allowed to run /reset_all and /addphone <number>
 ADMIN_IDS = {1997945569}
 

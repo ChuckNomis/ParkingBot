@@ -43,7 +43,7 @@ load_dotenv()                                          # read .env file
 
 TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_HOST: str = os.getenv("WEBHOOK_URL", "")  # without /webhook suffix
-WEBHOOK_PATH = "/webhook"
+WEBHOOK_PATH = ""
 WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
 _JSON_LOCK = Lock()  # protect concurrent writes
 PHONES_FILE = "user_phones.json"   # persisted phone numbers
@@ -91,9 +91,9 @@ application = (
 def _read_json(path: str | Path, default):
     """
     Read JSON from *path* (str or Path).
-    • Returns *default* on any FileNotFound / JSON error.
+    Returns *default* on FileNotFoundError or JSONDecodeError.
     """
-    path = Path(path)                # <-- accept str transparently
+    path = Path(path)             # accept either a str or Path
     try:
         with path.open(encoding="utf-8") as f:
             return json.load(f)
@@ -104,17 +104,17 @@ def _read_json(path: str | Path, default):
 def _atomic_write(path: str | Path, data):
     """
     Atomically write *data* as JSON to *path* (str or Path).
-    A temp-file in the same directory is moved into place so concurrent
-    readers never see a half-written file.
+    Uses a temp file + replace so readers never see a half‐written file.
     """
-    path = Path(path)                # <-- accept str transparently
-    with _JSON_LOCK:                 # protect concurrent writers
+    path = Path(path)             # accept either a str or Path
+    with _JSON_LOCK:              # prevent concurrent writers
         tmp_dir = path.parent
         with tempfile.NamedTemporaryFile(
             "w", delete=False, dir=tmp_dir, encoding="utf-8"
         ) as tmp:
             json.dump(data, tmp, ensure_ascii=False, indent=2)
         Path(tmp.name).replace(path)
+
 # ── Persistent load / save ─────────────────────────────────────────────────
 
 
@@ -458,15 +458,18 @@ def reset_parking():
 
 
 async def set_webhook():
-    load_persistent()
+    load_persistent()             # reload phones & allow-list
     bot = Bot(token=TOKEN)
     await application.initialize()
     await bot.set_webhook(url=WEBHOOK_URL)
+    print(f"✅ Webhook set to: {WEBHOOK_URL}")
     await application.job_queue.start()
-    # Daily reset 00:00
+    # Daily midnight reset
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(reset_parking, CronTrigger(
-        hour=0, minute=0, timezone=timezone("Asia/Jerusalem")))
+    scheduler.add_job(
+        reset_parking,
+        CronTrigger(hour=0, minute=0, timezone=timezone("Asia/Jerusalem"))
+    )
     scheduler.start()
 router = APIRouter()
 

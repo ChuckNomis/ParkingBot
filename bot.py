@@ -122,7 +122,11 @@ def _atomic_write(path: str | Path, data):
 def load_persistent():
     global USER_PHONES, ALLOWED_PHONES
     USER_PHONES = {int(k): v for k, v in _read_json(PHONES_FILE, {}).items()}
-    ALLOWED_PHONES = set(_read_json(ALLOW_FILE, []))
+
+    # normalise every entry read from JSON just in case it was saved “bare”
+    ALLOWED_PHONES_RAW = _read_json(ALLOW_FILE, [])
+    ALLOWED_PHONES = {_normalise(p) for p in ALLOWED_PHONES_RAW}
+
     print("✅ phones", USER_PHONES)
     print("✅ allow-list", ALLOWED_PHONES)
 
@@ -164,7 +168,7 @@ async def ensure_yard(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> str | 
 
 
 # ADMIN COMMANDS
-async def _normalise(raw: str) -> str:
+def _normalise(raw: str) -> str:
     """Israel local digits→ +972… ; keep international numbers unchanged."""
     return raw if raw.startswith("+") else f"+972{raw.lstrip('0')}"
 
@@ -175,7 +179,7 @@ async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /addphone <digits>")
         return
-    phone = await _normalise(context.args[0])
+    phone = _normalise(context.args[0])
     if phone in ALLOWED_PHONES:
         await update.message.reply_text("ℹ️ Already in allow‑list.")
         return
@@ -191,7 +195,7 @@ async def del_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /delphone <digits>")
         return
-    phone = await _normalise(context.args[0])
+    phone = _normalise(context.args[0])
     if phone not in ALLOWED_PHONES:
         await update.message.reply_text("ℹ️ Not found in allow‑list.")
         return
@@ -346,14 +350,14 @@ async def receive_phone(update: Update, _ctx):
     if not update.message.contact:
         return ConversationHandler.END
     uid = update.message.contact.user_id
-    phone = update.message.contact.phone_number
+    raw = update.message.contact.phone_number          # Telegram gives 9725…
+    phone = _normalise(raw)                        # >>> +9725…
     USER_PHONES[uid] = phone
     save_phones()
-    # keyboard logic: show nothing until the admin approves
-    kbd = main_menu(uid)
+    kb = main_menu(uid)
     await update.message.reply_text(
-        "✅ Phone saved!  You'll get access as soon as the admin approves it.",
-        reply_markup=kbd if kbd else ReplyKeyboardMarkup(
+        "✅ Phone saved!  You’ll get access as soon as the admin approves it.",
+        reply_markup=kb if kb else ReplyKeyboardMarkup(
             [], resize_keyboard=True)
     )
     print(f"📱 {phone} shared by {uid} ({update.effective_user.full_name})")
@@ -461,19 +465,20 @@ async def leave(update: Update, ctx):
     yard_name = await ensure_yard(update, ctx)
     if yard_name is None:
         return
-    yard = PARKING_YARDS[yard_name]
-    for slot, info in list(yard["slots"].items()):
-        if info["user_id"] == uid:
-            del yard["slots"][slot]
-            await update.message.reply_text(f"👋 You left slot {slot}.", reply_markup=main_menu(uid))
-            print(f"👋 {USER_PHONES[uid]} left slot {slot} ({yard_name})")
-            # inform people who were blocked by that slot
-            for b in yard["blocks"].get(slot, []):
-                blk_info = yard["slots"].get(b)
-                if blk_info:
-                    with suppress(Exception):
-                        await ctx.bot.send_message(blk_info["user_id"], f"🚧 Slot {slot} is now free.")
-            return
+    for other_yard_name, other_yard in PARKING_YARDS.items():
+        for slot, info in list(other_yard["slots"].items()):
+            if info["user_id"] == uid:
+                del other_yard["slots"][slot]
+                await update.message.reply_text(f"👋 You left slot {slot}.", reply_markup=main_menu(uid))
+                print(
+                    f"👋 {USER_PHONES[uid]} left slot {slot} ({other_yard_name})")
+                # inform people who were blocked by that slot
+                for b in other_yard["blocks"].get(slot, []):
+                    blk_info = other_yard["slots"].get(b)
+                    if blk_info:
+                        with suppress(Exception):
+                            await ctx.bot.send_message(blk_info["user_id"], f"🚧 Slot {slot} is now free.")
+                return
     await update.message.reply_text("❌ You are not parked.")
 
 

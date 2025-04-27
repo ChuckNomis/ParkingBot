@@ -164,13 +164,24 @@ async def ensure_yard(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> str | 
         return None
     return USER_YARD[uid]
 
-# ─────────────────────────────── Handlers ─────────────────────────────────────
 
-
-# ADMIN COMMANDS
 def _normalise(raw: str) -> str:
     """Israel local digits→ +972… ; keep international numbers unchanged."""
     return raw if raw.startswith("+") else f"+972{raw.lstrip('0')}"
+# ─────────────────────────────── Handlers ─────────────────────────────────────
+
+# ADMIN COMMANDS
+
+
+async def clear_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove *every* entry from USER_PHONES (admin-only)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return                                  # ignore non-admins
+
+    USER_PHONES.clear()                         # empty the dict
+    save_phones()                               # persist the change
+    await update.message.reply_text("🗑️ All saved phone numbers were cleared.")
+    print("🗑️ USER_PHONES cleared by admin")
 
 
 async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,6 +240,7 @@ action_admins = [
     ("delphone", del_phone),
     ("listphones", list_phones),
     ("reset_all_slots", reset_all_slots),
+    ("clearphones", clear_phones),
 ]
 for cmd, fn in action_admins:
     application.add_handler(CommandHandler(cmd, fn))

@@ -393,7 +393,16 @@ async def handle_parking_slot(update: Update, ctx):
     yard_name = await ensure_yard(update, ctx)
     if yard_name is None:
         return
-
+    for other_yard_name, other_yard in PARKING_YARDS.items():
+        for other_slot, info in other_yard["slots"].items():
+            if info["user_id"] == uid:
+                await update.message.reply_text(
+                    f"❌ You’re already parked in slot {other_slot} "
+                    f"({'this yard' if other_yard_name == yard_name else other_yard_name}).\n"
+                    "Use /leave first.",
+                    reply_markup=main_menu(uid),
+                )
+                return ConversationHandler.END
     txt = update.message.text.strip()
     if txt == "❌ Cancel":
         await update.message.reply_text("❌ Cancelled.", reply_markup=main_menu(uid))

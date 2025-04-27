@@ -200,6 +200,19 @@ async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"✅ {phone} added to allow‑list.")
 
 
+async def list_user_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send the full USER_PHONES dict to the admin that requested it."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return                                  # ignore non-admins
+
+    if USER_PHONES:
+        lines = [f"{uid}: {phone}" for uid, phone in USER_PHONES.items()]
+        text = "📒 *Saved phone numbers:*\n" + "\n".join(lines)
+    else:
+        text = "📒 (no phone numbers saved)"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def del_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -238,7 +251,8 @@ async def reset_all_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
 action_admins = [
     ("addphone", add_phone),
     ("delphone", del_phone),
-    ("listphones", list_phones),
+    ("listallowedphones", list_phones),
+    ("listuserphones", list_user_phones),
     ("reset_all_slots", reset_all_slots),
     ("clearphones", clear_phones),
 ]

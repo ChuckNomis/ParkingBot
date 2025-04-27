@@ -166,8 +166,20 @@ async def ensure_yard(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> str | 
 
 
 def _normalise(raw: str) -> str:
-    """Israel local digits→ +972… ; keep international numbers unchanged."""
-    return raw if raw.startswith("+") else f"+972{raw.lstrip('0')}"
+    """
+    Normalise Israeli phone numbers.
+    * “+9725….”  ->  unchanged
+    *  "9725…."  ->  "+9725…."
+    *   "0586…"  ->  "+972586…"
+    """
+    raw = raw.strip()
+    if raw.startswith("+"):
+        return raw                       # already international
+
+    if raw.startswith("972"):
+        return f"+{raw}"                # add '+' only
+    # local number like 05xxxxxxxx
+    return f"+972{raw.lstrip('0')}"
 # ─────────────────────────────── Handlers ─────────────────────────────────────
 
 # ADMIN COMMANDS

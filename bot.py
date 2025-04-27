@@ -476,13 +476,18 @@ async def handle_parking_slot(update: Update, ctx):
     if slot in yard["charging_slots"]:
         ctx.job_queue.run_once(send_charging_reminder, when=datetime.now(
         ) + timedelta(hours=1, minutes=30), data={"user_id": uid, "slot": slot, "yard": yard_name})
-
+    blocker_phone = USER_PHONES.get(uid, "no phone shared")
     # notify blocked slots
     for blocked in yard["blocks"].get(slot, []):
         info = yard["slots"].get(blocked)
         if info:
             with suppress(Exception):
-                await ctx.bot.send_message(info["user_id"], f"🚧 You're blocked by {update.effective_user.full_name} (slot {slot}).")
+                await ctx.bot.send_message(info["user_id"], (
+                    "🚧 *You're blocked*\n"
+                    f"• By: {update.effective_user.full_name}\n"
+                    f"• Slot: {slot}\n"
+                    f"• Phone: {blocker_phone}"
+                ))
 
     return ConversationHandler.END
 

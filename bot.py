@@ -50,7 +50,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 PHONES_FILE = DATA_DIR / "user_phones.json"   # persisted phone numbers
 ALLOW_FILE = DATA_DIR / "allowed_phones.json"
 # Telegram user‑IDs allowed to run /reset_all and /addphone <number>
-ADMIN_IDS = {1997945569}
+ADMIN_IDS = {1997945569, 444100640}
 
 # ── Yard / slot configuration ──────────────────────────────────────────────────
 PARKING_YARDS: dict[str, dict] = {
@@ -138,24 +138,18 @@ def save_allow():
 
 
 def main_menu(user_id: int | None = None) -> ReplyKeyboardMarkup:
-    if user_id not in USER_PHONES:                         # must share first
-        keyboard = [[KeyboardButton("📱 Share Phone", request_contact=True)]]
-    elif USER_PHONES[user_id] not in ALLOWED_PHONES:       # shared but not allowed
-        keyboard = [[]]   # empty keyboard
-    elif user_id is None or user_id not in USER_YARD:
-        keyboard = [["🏢 Choose Yard"]]
-    else:                                                  # fully authorised
-        keyboard = [["🅿️ Park", "🚶 Leave"], ["📋 Status"], ["🏢 Choose Yard"]]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    if user_id not in USER_PHONES:                       # must share first
+        rows = [[KeyboardButton("📱 Share Phone", request_contact=True)]]
+    elif USER_PHONES[user_id] not in ALLOWED_PHONES:     # shared but not yet approved
+        return None                                      # hide the keyboard completely
+    elif user_id not in USER_YARD:                       # approved but no yard yet
+        rows = [["🏢 Choose Yard"]]
+    else:                                                # fully authorised
+        rows = [["🅿️ Park", "🚶 Leave"],
+                ["📋 Status"],
+                ["🏢 Choose Yard"]]
 
-
-async def authorised(update: Update) -> bool:
-    u = update.effective_user
-    phone = USER_PHONES.get(u.id)
-    if u.id in ADMIN_IDS or (phone and phone in ALLOWED_PHONES):
-        return True
-    await update.message.reply_text("⛔ Private bot – ask admin for access.")
-    return False
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 async def ensure_yard(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -188,6 +182,7 @@ async def add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALLOWED_PHONES.add(phone)
     save_allow()
     await update.message.reply_text(f"✅ {phone} added.")
+    print(f"✅ {phone} added to allow‑list.")
 
 
 async def del_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,6 +198,7 @@ async def del_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ALLOWED_PHONES.remove(phone)
     save_allow()
     await update.message.reply_text(f"🗑️ {phone} removed from allow‑list.")
+    print(f"🗑️ {phone} removed from allow‑list.")
 
 
 async def list_phones(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,6 +217,7 @@ async def reset_all_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for yard in PARKING_YARDS.values():
         yard["slots"].clear()
     await update.message.reply_text("🧹 All yards reset.")
+    print("🧹 All yards reset.")
 
 # register admin handlers
 action_admins = [
@@ -349,9 +346,17 @@ async def receive_phone(update: Update, _ctx):
     if not update.message.contact:
         return ConversationHandler.END
     uid = update.message.contact.user_id
-    USER_PHONES[uid] = update.message.contact.phone_number
+    phone = update.message.contact.phone_number
+    USER_PHONES[uid] = phone
     save_phones()
-    await update.message.reply_text("✅ Phone saved!", reply_markup=main_menu(uid))
+    # keyboard logic: show nothing until the admin approves
+    kbd = main_menu(uid)
+    await update.message.reply_text(
+        "✅ Phone saved!  You'll get access as soon as the admin approves it.",
+        reply_markup=kbd if kbd else ReplyKeyboardMarkup(
+            [], resize_keyboard=True)
+    )
+    print(f"📱 {phone} shared by {uid} ({update.effective_user.full_name})")
     return ConversationHandler.END
 
 application.add_handler(ConversationHandler(
@@ -414,6 +419,7 @@ async def handle_parking_slot(update: Update, ctx):
         "time": datetime.now().isoformat(),
     }
     await update.message.reply_text(f"✅ Parked in slot {slot}.", reply_markup=main_menu(uid))
+    print(f"✅ {USER_PHONES[uid]} parked in slot {slot} ({yard_name})")
 
     # charging reminder
     if slot in yard["charging_slots"]:
@@ -451,6 +457,7 @@ async def leave(update: Update, ctx):
         if info["user_id"] == uid:
             del yard["slots"][slot]
             await update.message.reply_text(f"👋 You left slot {slot}.", reply_markup=main_menu(uid))
+            print(f"👋 {USER_PHONES[uid]} left slot {slot} ({yard_name})")
             # inform people who were blocked by that slot
             for b in yard["blocks"].get(slot, []):
                 blk_info = yard["slots"].get(b)
@@ -459,6 +466,7 @@ async def leave(update: Update, ctx):
                         await ctx.bot.send_message(blk_info["user_id"], f"🚧 Slot {slot} is now free.")
             return
     await update.message.reply_text("❌ You are not parked.")
+
 
 application.add_handler(CommandHandler("leave", leave))
 application.add_handler(MessageHandler(filters.Regex("^🚶 Leave$"), leave))
